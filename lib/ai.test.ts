@@ -151,3 +151,56 @@ describe("draftDesign cancellation", () => {
     expect(fetchMock.mock.calls[0][1]?.signal).toBe(ac.signal);
   });
 });
+
+describe("one retry for a reply that is not valid JSON", () => {
+  const project = { groups: [], frames: [{ id: "frame", name: "Home", x: 0, y: 0 }] };
+  const reply = (content: string) => jsonResponse({ choices: [{ finish_reason: "stop", message: { content } }] });
+  const trailingComma = `{"groups": [], "frames": [{"id": "frame", "name": "Home", "x": 0, "y": 0},]}`;
+
+  it("uses a reply that parses with a single request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(reply(JSON.stringify(project)));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(draftDesign(settings(), "guide text", "a notes app", "en")).resolves.toMatchObject({ frames: [{ id: "frame" }] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks once more with the reminder and answers", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(trailingComma))
+      .mockResolvedValueOnce(reply(JSON.stringify(project)));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(draftDesign(settings(), "guide text", "a notes app", "en")).resolves.toMatchObject({ frames: [{ id: "frame" }] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const second = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(second.messages[1].content).toContain("Your previous reply was not valid JSON");
+  });
+
+  it("fails as before when the second reply is not valid JSON either", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(reply(trailingComma)));
+    vi.stubGlobal("fetch", fetchMock);
+    /* the second failure surfaces exactly as a single malformed reply does today */
+    await expect(draftDesign(settings(), "guide text", "a notes app", "en")).rejects.toBeInstanceOf(SyntaxError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a reply the provider cut off", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ choices: [{ finish_reason: "length", message: { content: "partial" } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(draftDesign(settings(), "guide text", "a notes app", "en")).rejects.toThrow("long");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends no second request after an abort", async () => {
+    const ac = new AbortController();
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const run = draftDesign(settings(), "guide text", "a notes app", "en", ac.signal);
+    ac.abort();
+    await expect(run).rejects.toThrow(/abort/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
