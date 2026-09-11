@@ -95,7 +95,7 @@ import { constrainModalRails, modalRailOf, updateRail } from "@/lib/rail";
 import { isProject, readProject, saveProject } from "@/lib/project";
 import { hasShareHash, readShareHash } from "@/lib/share";
 import { LoadingIndicator } from "@/components/Loading";
-import { draftDesign } from "@/lib/ai";
+import { draftDesign, editDesign } from "@/lib/ai";
 import { ShareDialog } from "@/components/ShareMenu";
 import { ColorPanel } from "@/components/ColorPanel";
 import { MotionPanel, ShapePanel, TypePanel } from "@/components/ThemePanel";
@@ -2204,7 +2204,18 @@ export default function Page() {
     } catch {}
   };
 
-  const startDraft = async (idea: string) => {
+  /** the guide the model reads, fetched once: the same file a coding agent reads */
+  const loadGuide = async (signal?: AbortSignal) => {
+    if (guideRef.current === null) {
+      const res = await fetch(`${BASE_PATH}/agent.md`, { signal });
+      if (!res.ok) throw new Error("guide");
+      guideRef.current = await res.text();
+    }
+    return guideRef.current;
+  };
+
+  /** one model call: a draft and an edit share the busy state and the error toast */
+  const runAiAction = async (run: (guide: string, signal: AbortSignal) => Promise<Doc>) => {
     setShareOpen(false);
     /* a second Generate replaces the first run instead of running beside it */
     draftAbortRef.current?.abort();
@@ -2212,13 +2223,9 @@ export default function Page() {
     draftAbortRef.current = ac;
     setDraftBusy(true);
     try {
-      if (guideRef.current === null) {
-        const res = await fetch(`${BASE_PATH}/agent.md`, { signal: ac.signal });
-        if (!res.ok) throw new Error("guide");
-        guideRef.current = await res.text();
-      }
+      const guide = await loadGuide(ac.signal);
       if (ac.signal.aborted) return;
-      const next = await draftDesign(aiSettings, guideRef.current, idea, lang, ac.signal);
+      const next = await run(guide, ac.signal);
       /* a reply that lands after Stop never takes the canvas */
       if (ac.signal.aborted) return;
       arrive(next);
@@ -2241,6 +2248,11 @@ export default function Page() {
     draftAbortRef.current = null;
     setDraftBusy(false);
   };
+
+  const startDraft = (idea: string) => runAiAction((guide, signal) => draftDesign(aiSettings, guide, idea, lang, signal));
+
+  /** applies the typed instruction to the design on the canvas, through the same review flow */
+  const startEdit = (instruction: string) => runAiAction((guide, signal) => editDesign(aiSettings, guide, doc, instruction, lang, signal));
   /** true after a kept draft until the author undoes something, so the header's undo also sits by the opener */
   const [quickUndo, setQuickUndo] = useState(false);
   const keepDraft = () => {
@@ -4189,6 +4201,7 @@ export default function Page() {
           open={shareOpen}
           onClose={() => setShareOpen(false)}
           onDraft={(idea) => void startDraft(idea)}
+          onEdit={(instruction) => void startEdit(instruction)}
           onSetupAi={() => {
             setShareOpen(false);
             setLeftOpen(true);
